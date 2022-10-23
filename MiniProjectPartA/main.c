@@ -1,17 +1,28 @@
 /* USER CODE BEGIN Header */
 /**
 *******************************************************
-Info:		Mini Project Reciever
-Author:		Harry Nel and Sean Poole
+Info:		STM32 ADCs, GPIO Interrupts and PWM with HAL
+Author:		Amaan Vally
 *******************************************************
-*******************************************************
-*******************************************************
+In this practical you will learn to use the ADC on the STM32 using the HAL.
+Here, we will be measuring the voltage on a potentiometer and using its value
+to adjust the brightness of the on board LEDs. We set up an interrupt to switch the
+display between the blue and green LEDs.
+
+Code is also provided to send data from the STM32 to other devices using UART protocol
+by using HAL. You will need Putty or a Python script to read from the serial port on your PC.
+
+UART Connections are as follows: 5V->5V GND->GND RXD->PA2 TXD->PA3(unused).
+Open device manager and go to Ports. Plug in the USB connector with the STM powered on.
+Check the port number (COMx). Open up Putty and create a new Serial session on that COMx
+with baud rate of 9600.
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -25,12 +36,6 @@ Author:		Harry Nel and Sean Poole
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
-//Creating two global arrays
-int values[1000];			//Array to store values from the POT
-int message[50]={0};		//Array to store the received binary data
-int numSamp=0;				//Array to store number of samples
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -39,15 +44,25 @@ int numSamp=0;				//Array to store number of samples
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
- TIM_HandleTypeDef htim2;
+ ADC_HandleTypeDef hadc;
+DMA_HandleTypeDef hdma_adc;
+
 TIM_HandleTypeDef htim3;
-DMA_HandleTypeDef hdma_tim2_ch1;
+
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
+int message[13] = {0,0,0,0,0,0,0,0,0,0,0,0,0};
+int Delay = 10;
+int binNum[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+int numSam = 0;
+char buffer[4];
 
-//Buffer for UART
-char buffer[10];
+
+//TO DO:
+//TASK 1
+//Create global variables for debouncing and delay interval
 
 /* USER CODE END PV */
 
@@ -55,11 +70,14 @@ char buffer[10];
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-static void MX_TIM2_Init(void);
-static void MX_TIM3_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_ADC_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 void EXTI0_1_IRQHandler(void);
+uint32_t pollADC(void);
+uint32_t ADCtoCRR(uint32_t adc_val);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -96,161 +114,120 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_TIM2_Init();
-  MX_TIM3_Init();
   MX_USART2_UART_Init();
+  MX_ADC_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
 
-  //Function to convert received binary to a decimal number
-  void binaryToDecimal (int num[])
-  {
-	  int deci_num=0;
-	  int j=0;
-	  int data[24]={0};
-	  int k =0;
-	  if((num[0]&&num[1]&&num[2]&&num[3]&&num[4]&&num[5] == 1)&&(num[5]==0))
-	  {
-		  //Sending an empty line to signify new value
-		  sprintf(buffer, "\r\n\n");
-		  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
+  //Function which generates the start condition for the message
+  void startBit(int mult){
+  	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8,1); //Writes the pin to high
+  	HAL_Delay(1000*mult);//Delays for 1sec
+  }
 
-		  //Declaring variables to be used
+  //Function which takes a sample from the POT
+  uint32_t pollADC(void){
+  	uint32_t val = 0;    					//Declares a temp variable
+  	HAL_ADC_Start(&hadc);
+  	HAL_ADC_PollForConversion(&hadc,1);	    //Sets the ADC to polling mode
+  	val = HAL_ADC_GetValue(&hadc);			//Gets the value from the ADC and stores it
+  	numSam++;								//increments the number of samples taken
+  	HAL_ADC_Stop(&hadc);					//Stops the ADC
+  	return val;								//outputs the temp variable
+  }
 
+  //Function which converts an inputed number into binary
+  void convertToBin(uint32_t val){
+	  uint32_t i;							//Instantiates a unsigned integer
+	  int binA[32];							//temporary integer array
+	  int counter = 0;						//Count variable
+	  for(i=1<<31;i>0;i=i/2){
+		  (val & i) ? (binA[counter] = 1) : (binA[counter] = 0); counter = counter +1;
+	  } // The line above fills the temp array with the corresponding 1's and 0's
 
-		  sprintf(buffer, "\r\n\n");
-		  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
-
-		  //For loop to take the binary data from the message array
-		  for(int i=5; i<29; i++)
-		  {
-				  data[k]=num[i];
-				  k++;
-		  }
-
-		  int p=0;
-		  sprintf(buffer, "\r\n\n");
-		  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
-
-		  //Converting binary array to decimal integer
-		  for(int l = 23;l>=0;l=l-2)
-		  {
-			  int h = (int)pow(2,p);
-			  deci_num=deci_num+(data[l]*h);
-			  p++;
-		  }
-
-		  //Taking out the parity bit
-		  int parity =message[30];
-		  sprintf(buffer, "%d\r\n\n", parity);
-		  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
-
-		  int pcheck=0; //variable to check parity
-
-
-		  //Start of checking parity
-		  for (int y =0; y<24;y++)
-		  {
-			  if(data[y]==1)
-			  {
-				  pcheck= pcheck+1;
-			  }
-		  }
-
-
-		  //Checking the parity
-		  if((pcheck%2==0 && parity==0) || (pcheck%2 == 1 && parity==1) )
-		  {
-			  sprintf(buffer, "%d\r\n\n", 1);
-			  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
-
-		  }
-		  else
-		  {
-			  sprintf(buffer, "%d\r\n\n", 2);
-			  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-
-		  }
-
-		  values[j]=deci_num;
-		  sprintf(buffer, "%d\r\n\n", deci_num);
-		  HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 1000);
-		  j++;
-		  numSamp++;	//Increasing number of samples
-  	  	 }
-	  else //Checking sample numbers using the checkpoint and flashing the LED
-	  {
-		  for(int i=9; i<33; i++)
-		  {
-			  data[k]=num[i];
-			  k++;
-		  }
-		  for(int l = 23;l>=0;l=l-2)
-		  {
-			  int h = (int)pow(2,p);
-			  deci_num=deci_num+(data[l]*h);
-			  p++;
-		  }
-		  if(numSamp==deci_num)	//Flashing twice
-		  {
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-		  }
-		  else					//Flashing four times if wrong and setting numSamp
-		  {
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
-			  HAL_Delay(400);
-			  numSamp=deci_num;
-		  }
+	  int index = 0;
+	  for(int i = 20; i <= 32; i++){
+		  message[index] = binA[i]; //transfer the last 12 bits into the message array.
+		  index = index++;
 	  }
-   }
+  }
 
 
+  //Function which checks the parity of the message
+  void evenParitySet(void){
+  	int count = 0;				//counter for number of 1's
+  	for(int i = 0; i < 12;i++){ //loop through the whole binNum
+  		if(message[i]== 1){		//if the value at i is 1 then
+  			count++;			//increment count
+  		}
+  	}
+
+  	if(count % 2 == 0){			//Check if count is even
+  		message[12] = 0;		//if even, parity = 0
+  	}else{
+  		message[12] = 1;		//if odd, parity = 1
+  	}
+  }
+
+  //Function which generates the stop condition for the message
+  void stopBit (void){
+  	for(int h = 0; h < 5; h++){
+  		HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8,1); //sets pin to high
+  		HAL_Delay(100);							//Delays for 100ms
+  		HAL_GPIO_WritePin(GPIOC,GPIO_PIN_8,0);	//sets pin low
+  		HAL_Delay(100);							//Delays for 100ms
+  	}
+  }
+
+  //HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4); //Start the PWM on TIM3 Channel 4 (Green LED)
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  	  	  if(HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_4)==1)				//Starting reading when pin PA4 goes high
-	  	  	  {
-					for(int p =0; p<5;p++)
-					{
-						message[p]=(HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_4));	//Entering start bit into array with a delay of 200ms
-						HAL_Delay(200);
-					}
-					HAL_Delay(50);											//Delay of 50ms to ensure we are not reading on a clock edge
-					for(int i =5; i<50; i++)
-					{
-						message[i]=(HAL_GPIO_ReadPin (GPIOA, GPIO_PIN_4));	//Reading the rest of message into array
-						HAL_Delay(200);
-					}
-
-					binaryToDecimal(message);								//Sending binary message array to decimal function
-	  	  	 }
-
-	      /* USER CODE END WHILE */
-
-	    /* USER CODE END 3 */
+	  if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0)){//Check to see if button is pressed
+		//int temp = 36;
+		convertToBin(pollADC());								//Calls the conversion function
+	  	evenParitySet();								//Calls the parity check function
+	  	startBit(1);									//Calls the Start condition function
+	  	for(int i = 0; i <= 12; i++){					//Runs through the length of the message
+	  		if(message[i] == 1){						//Checks if the value at i is high
+	  			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
+	  			HAL_Delay(400);							//Delay for 400ms
+	  		}else{
+	  			HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 0);//Toggles low if false
+	  			HAL_Delay(400);							//Delays for 400ms
+	  		}
+	  	}
+	  	stopBit();										//Calls the stop condition function
 	  }
-    /* USER CODE BEGIN 3 */
- }
-  /* USER CODE END 3 */
 
+	  if(HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_15) == 1){		//Check to see if external button is pressed
+		  convertToBin(numSam);							//Calls the conversion function
+		  evenParitySet();								//Calls the parity check function
+		  startBit(2);									//Calls the Start condition function
+		  for(int i = 0; i <= 12; i++){					//Runs through the length of the message
+		  	  if(message[i] == 1){						//Checks if the value at i is high
+		  	  	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 1);//Toggles high if true
+		  	  	HAL_Delay(400);							//Delay for 400ms
+		  	  }else{
+		  	  	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, 0);//Toggles low if false
+		  	  	HAL_Delay(400);							//Delays for 400ms
+		  	  }
+		  	 }
+		  	 stopBit();  								//Calls the stop Condition
+	  }
+
+
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
 
 /**
   * @brief System Clock Configuration
@@ -264,9 +241,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSI14;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSI14State = RCC_HSI14_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.HSI14CalibrationValue = 16;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL12;
@@ -291,60 +270,56 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
+  * @brief ADC Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+static void MX_ADC_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* USER CODE BEGIN ADC_Init 0 */
 
-  /* USER CODE END TIM2_Init 0 */
+  /* USER CODE END ADC_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
+  ADC_ChannelConfTypeDef sConfig = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
+  /* USER CODE BEGIN ADC_Init 1 */
 
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 100;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  /* USER CODE END ADC_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc.Instance = ADC1;
+  hadc.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
+  hadc.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc.Init.LowPowerAutoWait = DISABLE;
+  hadc.Init.LowPowerAutoPowerOff = DISABLE;
+  hadc.Init.ContinuousConvMode = DISABLE;
+  hadc.Init.DiscontinuousConvMode = DISABLE;
+  hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc.Init.DMAContinuousRequests = DISABLE;
+  hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  if (HAL_ADC_Init(&hadc) != HAL_OK)
   {
     Error_Handler();
   }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_OC_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
+  /** Configure for the selected ADC regular channel to be converted.
+  */
+  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC_Init 2 */
+
+  /* USER CODE END ADC_Init 2 */
 
 }
 
@@ -370,7 +345,7 @@ static void MX_TIM3_Init(void)
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 1023;
+  htim3.Init.Period = 47999;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
@@ -396,7 +371,7 @@ static void MX_TIM3_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -452,6 +427,9 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
   /* DMA1_Channel4_5_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel4_5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel4_5_IRQn);
@@ -471,34 +449,48 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, LD4_Pin|LD3_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LD4_GPIO_Port, LD4_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA4 PA5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LD4_Pin LD3_Pin */
-  GPIO_InitStruct.Pin = LD4_Pin|LD3_Pin;
+  /*Configure GPIO pin : LD4_Pin */
+  GPIO_InitStruct.Pin = LD4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  HAL_GPIO_Init(LD4_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB6 PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF1_I2C1;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  //Configure Pin PB15
+  GPIO_InitStruct.Pin = GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_1_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_1_IRQn);
+  //HAL_NVIC_SetPriority(EXTI0_1_IRQn, 0, 0);
+  //HAL_NVIC_EnableIRQ(EXTI0_1_IRQn);
 
 }
+
+/* USER CODE BEGIN 4 */
+
+
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
